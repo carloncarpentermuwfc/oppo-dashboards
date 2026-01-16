@@ -11,6 +11,7 @@ from tracking_data import (
     load_tracking_events,
     load_match_metadata,
     attach_match_dates,
+    add_opponent_labels,
     FilterState,
     available_date_bounds,
     available_match_bounds,
@@ -24,11 +25,13 @@ from viz import (
 )
 from report import build_pdf_report
 
+st.set_page_config(page_title="Team Season Profiles (Tracking)", layout="wide")
 
-st.set_page_config(page_title="Opposition Team-Season Profiles (Tracking)", layout="wide")
-
-st.title("Opposition Team-Season Profiles")
-st.caption("Tracking/enriched dataset profile dashboard. Export PDFs from the current filters.")
+st.title("Team Season Profiles")
+st.caption(
+    "Select a focus team. Dashboards and PDFs summarize that team across ALL opponents "
+    "(optionally filter opponents and date ranges)."
+)
 
 # ---------------- Data load ----------------
 with st.sidebar:
@@ -48,6 +51,7 @@ if load_btn:
         df = load_tracking_events(uploaded_file=uploaded_events, fallback_path=local_path.strip() or None)
         meta = load_match_metadata(uploaded_meta) if uploaded_meta is not None else None
         df, has_dates = attach_match_dates(df, meta)
+        df = add_opponent_labels(df)  # adds opponent_shortname per match/team
         st.session_state.df = df
         st.session_state.has_dates = has_dates
         st.success(f"Loaded {len(df):,} rows. Dates available: {'Yes' if has_dates else 'No'}")
@@ -67,13 +71,23 @@ has_dates = st.session_state.has_dates
 with st.sidebar:
     st.header("Filters")
 
-    # These canonical column names are guaranteed by load_tracking_events()
     teams = sorted(df["team_shortname"].dropna().unique().tolist())
-    opposition = st.selectbox("Opposition", options=teams)
+    team = st.selectbox("Focus team", options=teams)
 
-    match_ids = sorted(df.loc[df["team_shortname"] == opposition, "match_id"].dropna().unique().tolist())
+    # Opponent filter (default: all)
+    opps = sorted(df.loc[df["team_shortname"] == team, "opponent_shortname"].dropna().unique().tolist())
+    opponents = st.multiselect("Opponents (optional)", options=opps, default=opps)
+
+    # Match selection (default: all matches for selected opponents)
+    match_ids = sorted(
+        df.loc[(df["team_shortname"] == team) & (df["opponent_shortname"].isin(opponents)), "match_id"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
     selected_matches = st.multiselect("Matches (match_id)", options=match_ids, default=match_ids)
 
+    # Date range (default: full range)
     if has_dates:
         dmin, dmax = available_date_bounds(df)
         date_range = st.date_input("Date range", value=(dmin, dmax), min_value=dmin, max_value=dmax)
@@ -91,7 +105,8 @@ with st.sidebar:
     only_possession_ends = st.checkbox("Only possession ends", value=False)
 
 state = FilterState(
-    opposition=opposition,
+    team=team,
+    opponents=opponents,
     match_ids=selected_matches,
     date_start=date_start,
     date_end=date_end,
@@ -104,42 +119,45 @@ state = FilterState(
 fdf = apply_filters(df, state)
 
 # ---------------- Summary ----------------
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Rows", f"{len(fdf):,}")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Team", state.team)
 c2.metric("Matches", f"{fdf['match_id'].nunique():,}")
-c3.metric("Possessions (approx)", f"{fdf['team_possession_id'].nunique():,}" if "team_possession_id" in fdf.columns else "—")
-c4.metric("Total xThreat", f"{fdf['xthreat'].fillna(0).sum():.2f}" if "xthreat" in fdf.columns else "—")
+c3.metric("Opponents", f"{fdf['opponent_shortname'].nunique():,}" if "opponent_shortname" in fdf.columns else "—")
+c4.metric("Possessions (approx)", f"{fdf['team_possession_id'].nunique():,}" if "team_possession_id" in fdf.columns else "—")
+c5.metric("Total xThreat", f"{fdf['xthreat'].fillna(0).sum():.2f}" if "xthreat" in fdf.columns else "—")
 
 st.divider()
 
+# ---------------- Visuals ----------------
 left, right = st.columns(2, gap="large")
 
 with left:
-    st.subheader("Possession outcomes")
+    st.subheader(f"{state.team}: Possession outcomes")
     st.pyplot(fig_possession_outcomes(fdf), clear_figure=True)
 
-    st.subheader("Threat creation heatmap")
+    st.subheader(f"{state.team}: Threat creation heatmap")
     st.pyplot(fig_threat_heatmap(fdf), clear_figure=True)
 
 with right:
-    st.subheader("xThreat over time")
+    st.subheader(f"{state.team}: xThreat over time")
     st.pyplot(fig_xthreat_timeseries(fdf), clear_figure=True)
 
-    st.subheader("Progression map (start → end)")
+    st.subheader(f"{state.team}: Progression map (start → end)")
     st.pyplot(fig_progression_map(fdf), clear_figure=True)
 
 st.divider()
 
+# ---------------- PDF Export ----------------
 st.subheader("Export PDF profile")
 
 colA, colB = st.columns([1, 2])
 with colA:
-    report_title = st.text_input("Report title", value=f"{state.opposition} — Team Profile")
+    report_title = st.text_input("Report title", value=f"{state.team} — Team Profile (All Opponents)")
     analyst = st.text_input("Analyst name (optional)", value="")
     export_btn = st.button("Generate PDF", type="primary")
 
 with colB:
-    st.caption("PDF is generated from the current filters.")
+    st.caption("PDF is generated from the current filters (team + opponents + matches + dates).")
 
 if export_btn:
     try:
@@ -153,7 +171,7 @@ if export_btn:
         st.download_button(
             "Download PDF",
             data=pdf_bytes,
-            file_name=f"{state.opposition}_team_profile.pdf".replace(" ", "_"),
+            file_name=f"{state.team}_team_profile.pdf".replace(" ", "_"),
             mime="application/pdf",
         )
     except Exception as e:
