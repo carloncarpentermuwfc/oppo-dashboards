@@ -29,7 +29,7 @@ def build_pdf_report(df: pd.DataFrame, state, title: str, analyst_name: str | No
     story.append(Paragraph(title, styles["Title"]))
     story.append(Spacer(1, 0.15 * inch))
 
-    meta = [f"<b>Opposition:</b> {state.opposition}"]
+    meta = [f"<b>Team:</b> {state.team}"]
     meta.append(f"<b>Matches:</b> {len(state.match_ids):,}")
     if state.has_dates and getattr(state, "date_start", None) and getattr(state, "date_end", None):
         meta.append(f"<b>Date range:</b> {state.date_start} to {state.date_end}")
