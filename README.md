@@ -1,25 +1,27 @@
-# Opposition Team-Season Dashboard (Streamlit)
+# Opposition Team-Season Profiles (Tracking dataset)
 
-This dashboard:
-- Loads an events CSV
-- Filters by **opposition team**, season, competition, **date range**, event types
-- Exports a **team-season profile PDF** based on the current filters
+This version is adapted for the merged tracking/enriched dataset (294 columns) that includes:
+- `team_shortname`, `match_id`
+- `xthreat`, `xshot_player_possession_*`, `xloss_player_possession_*`
+- Coordinates: `x_start`, `y_start`, `x_end`, `y_end` (meters, centered)
 
-## Run locally
+## Run
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Notes about imports (fix included)
-- `data.py` has been renamed to `events_data.py` to avoid module name conflicts.
-- `app.py` forces the app directory onto `sys.path` so local imports work on Streamlit Cloud.
+## Date range filtering
 
-## Expected CSV columns
-Required:
-- `Event type`, `Outcome`, `Player`, `Team`, `Competition`, `Season`, `Match`, `Date`
+Your tracking CSV does **not** include match dates. To enable date-range filters, upload an additional CSV with:
 
-Optional but used when available:
-- `Start X`, `Start Y`, `End X`, `End Y`
-- `In attacking third` / `Inside attacking third`
+- `match_id`
+- `date` (YYYY-MM-DD)
+
+The app will attach `match_date` and enable the date filter automatically.
+
+## Opposition filter
+
+The main selector is **Opposition**, driven by `team_shortname`.
+
