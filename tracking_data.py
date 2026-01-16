@@ -5,13 +5,10 @@ from datetime import date
 from typing import Optional
 
 import pandas as pd
-
-
-REQUIRED_CANONICAL = ["match_id", "team_id", "team_shortname"]
+import re
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Strip whitespace and remove BOM artifacts
     df = df.copy()
     df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
     return df
@@ -28,14 +25,15 @@ def _find_column(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
 
 def _find_fuzzy(df: pd.DataFrame, pattern: str) -> Optional[str]:
     for c in df.columns:
-        if pd.notna(c) and __import__("re").search(pattern, str(c), flags=__import__("re").IGNORECASE):
+        if re.search(pattern, str(c), flags=re.IGNORECASE):
             return c
     return None
 
 
 @dataclass(frozen=True)
 class FilterState:
-    opposition: str
+    team: str
+    opponents: list[str]
     match_ids: list[int]
     date_start: Optional[date]
     date_end: Optional[date]
@@ -46,14 +44,6 @@ class FilterState:
 
 
 def load_tracking_events(uploaded_file=None, fallback_path: Optional[str] = None) -> pd.DataFrame:
-    """
-    Loads the tracking/enriched CSV and normalizes key column names to:
-      - match_id
-      - team_id
-      - team_shortname
-
-    This prevents KeyErrors caused by header whitespace, BOMs, or slight naming differences.
-    """
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file, comment="#")
     elif fallback_path:
@@ -63,13 +53,13 @@ def load_tracking_events(uploaded_file=None, fallback_path: Optional[str] = None
 
     df = _normalize_columns(df)
 
-    # Resolve key columns robustly
     match_col = _find_column(df, ["match_id"]) or _find_fuzzy(df, r"^match[\s_]*id$")
     teamid_col = _find_column(df, ["team_id"]) or _find_fuzzy(df, r"^team[\s_]*id$")
     short_col = (
         _find_column(df, ["team_shortname", "team_short_name", "team_short", "team_abbrev", "team_abbreviation"])
         or _find_fuzzy(df, r"team.*short")
         or _find_fuzzy(df, r"team.*abbr")
+        or _find_fuzzy(df, r"team.*name")
     )
 
     missing = []
@@ -78,22 +68,16 @@ def load_tracking_events(uploaded_file=None, fallback_path: Optional[str] = None
     if short_col is None: missing.append("team_shortname")
     if missing:
         raise ValueError(
-            "Could not find required columns in your file: "
-            + ", ".join(missing)
-            + ".\nDetected columns include: "
-            + ", ".join(list(df.columns)[:30])
+            "Could not find required columns: " + ", ".join(missing) +
+            ". First 30 detected columns: " + ", ".join(list(df.columns)[:30])
         )
 
-    # Rename to canonical names
-    rename_map = {match_col: "match_id", teamid_col: "team_id", short_col: "team_shortname"}
-    df = df.rename(columns=rename_map)
+    df = df.rename(columns={match_col: "match_id", teamid_col: "team_id", short_col: "team_shortname"})
 
-    # Types
     df["match_id"] = pd.to_numeric(df["match_id"], errors="coerce").astype("Int64")
     df["team_id"] = pd.to_numeric(df["team_id"], errors="coerce").astype("Int64")
     df["team_shortname"] = df["team_shortname"].astype(str).str.strip()
 
-    # Optional columns used by visuals
     for c in ["minute_start", "second_start"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -128,8 +112,7 @@ def load_match_metadata(uploaded_file) -> Optional[pd.DataFrame]:
         return None
     meta = pd.read_csv(uploaded_file)
     meta.columns = [str(c).strip().lstrip("\ufeff") for c in meta.columns]
-    expected = {"match_id", "date"}
-    if not expected.issubset(set(meta.columns)):
+    if not {"match_id", "date"}.issubset(set(meta.columns)):
         raise ValueError("Match metadata CSV must have columns: match_id, date")
     meta = meta.copy()
     meta["match_id"] = pd.to_numeric(meta["match_id"], errors="coerce").astype("Int64")
@@ -145,10 +128,37 @@ def attach_match_dates(df: pd.DataFrame, meta: Optional[pd.DataFrame]):
     return out, out["match_date"].notna().any()
 
 
+def add_opponent_labels(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds opponent_shortname for each (match_id, team_shortname).
+    Assumes typical football matches have two teams per match_id.
+    If more than two teams appear, uses the most frequent 'other team' as opponent.
+    """
+    out = df.copy()
+
+    # Map match_id -> list of teams
+    teams_by_match = out.groupby("match_id")["team_shortname"].apply(lambda s: [t for t in s.dropna().unique().tolist()]).to_dict()
+
+    def opponent_for_row(row):
+        mid = row["match_id"]
+        team = row["team_shortname"]
+        teams = teams_by_match.get(mid, [])
+        others = [t for t in teams if t != team]
+        if not others:
+            return None
+        if len(others) == 1:
+            return others[0]
+        # if >1, pick most frequent other team in that match
+        sub = out[out["match_id"] == mid]
+        freq = sub[sub["team_shortname"] != team]["team_shortname"].value_counts()
+        return freq.index[0] if len(freq) else others[0]
+
+    out["opponent_shortname"] = out.apply(opponent_for_row, axis=1)
+    return out
+
+
 def available_date_bounds(df: pd.DataFrame):
-    dmin = df["match_date"].min()
-    dmax = df["match_date"].max()
-    return dmin, dmax
+    return df["match_date"].min(), df["match_date"].max()
 
 
 def available_match_bounds(df: pd.DataFrame):
@@ -159,7 +169,11 @@ def available_match_bounds(df: pd.DataFrame):
 
 def apply_filters(df: pd.DataFrame, state: FilterState) -> pd.DataFrame:
     f = df.copy()
-    f = f[f["team_shortname"] == state.opposition]
+    f = f[f["team_shortname"] == state.team]
+
+    if state.opponents:
+        if "opponent_shortname" in f.columns:
+            f = f[f["opponent_shortname"].isin(state.opponents)]
 
     if state.match_ids:
         f = f[f["match_id"].isin(state.match_ids)]
